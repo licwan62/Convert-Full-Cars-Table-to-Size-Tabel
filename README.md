@@ -28,12 +28,14 @@ pip install -r requirements.txt
 python .\process_tsv.py .\data\input\your_file.tsv
 ```
 
-默认会在 `data/output/输入文件名/` 下输出三个 TSV 和一个多 sheet Excel：
+默认会在 `data/output/输入文件名/` 下输出五个 TSV 和一个多 sheet Excel：
 
 ```text
 data/output/your_file/your_file_非皮卡尺码压缩.tsv
 data/output/your_file/your_file_皮卡尺码压缩.tsv
 data/output/your_file/your_file_适配器.tsv
+data/output/your_file/your_file_非皮卡中间压缩.tsv
+data/output/your_file/your_file_皮卡中间压缩.tsv
 data/output/your_file/your_file_output.xlsx
 ```
 

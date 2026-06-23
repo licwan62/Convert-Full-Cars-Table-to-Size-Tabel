@@ -29,6 +29,17 @@ NON_PICKUP_FINAL_COLUMNS = [
     "主车型",
     "BRAND",
     "MODEL",
+    "YEAR",
+    "Const",
+    "VERSION",
+    "BackSize",
+    "桥接状态",
+    "原始年份列表",
+]
+NON_PICKUP_INTERMEDIATE_COLUMNS = [
+    "主车型",
+    "BRAND",
+    "MODEL",
     "SUB_MODEL",
     "YEAR",
     "Const",
@@ -38,6 +49,19 @@ NON_PICKUP_FINAL_COLUMNS = [
     "原始年份列表",
 ]
 PICKUP_FINAL_COLUMNS = [
+    "主车型",
+    "BRAND",
+    "MODEL",
+    "YEAR",
+    "Const",
+    "VERSION",
+    "CAB",
+    "BED_FT",
+    "BackSize",
+    "桥接状态",
+    "原始年份列表",
+]
+PICKUP_INTERMEDIATE_COLUMNS = [
     "主车型",
     "BRAND",
     "MODEL",
@@ -260,8 +284,69 @@ def require_columns(df: pd.DataFrame, required_columns: list[str] | None = None)
         raise ValueError("Input TSV is missing required columns: " + ", ".join(missing))
 
 
-def transform_non_pickup(df: pd.DataFrame) -> pd.DataFrame:
-    """Convert the non-pickup Power Query logic into a pandas transformation."""
+def build_non_pickup_compressed(renamed: pd.DataFrame, include_sub_model: bool) -> pd.DataFrame:
+    model_keys = ["主车型", "BRAND", "MODEL"]
+    if include_sub_model:
+        model_keys.append("SUB_MODEL")
+
+    second_keys = [*model_keys, "Const", "BackSize"]
+    output_columns = NON_PICKUP_INTERMEDIATE_COLUMNS if include_sub_model else NON_PICKUP_FINAL_COLUMNS
+    if renamed.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    grouped = (
+        renamed.groupby(second_keys, dropna=False, sort=False)
+        .agg(
+            year_start=("year_start", "min"),
+            year_end=("year_end", "max"),
+            VERSION=("VERSION_RAW", combine_versions),
+            原始年份列表=("原始年份列表", combine_year_text),
+        )
+        .reset_index()
+    )
+
+    grouped["YEAR"] = grouped.apply(
+        lambda row: str(int(row["year_start"]))
+        if row["year_start"] == row["year_end"]
+        else f"{int(row['year_start'])}-{int(row['year_end'])}",
+        axis=1,
+    )
+    grouped["桥接状态"] = grouped["原始年份列表"].map(bridge_status)
+
+    sort_columns = [*model_keys, "Const", "VERSION", "year_start", "year_end"]
+    grouped = grouped.sort_values(sort_columns, kind="mergesort").reset_index(drop=True)
+
+    excl_keys = [*model_keys, "year_start", "year_end", "Const"]
+    excl_list = (
+        grouped.groupby(excl_keys, dropna=False, sort=False)
+        .apply(build_excl_list)
+        .reset_index(name="EXCL_LIST")
+    )
+
+    merged = grouped.merge(excl_list, on=excl_keys, how="left")
+
+    def update_version(row: pd.Series) -> str:
+        version = normalize_text(row["VERSION"])
+        excl = normalize_text(row["EXCL_LIST"])
+        size = normalize_text(row["BackSize"])
+
+        if excl and size and size != "无可用尺码":
+            return f"EXCL: {excl}" if not version else f"{version} EXCL: {excl}"
+        return version
+
+    merged["VERSION"] = merged.apply(update_version, axis=1)
+    merged["year_start"] = merged["year_start"].astype(int)
+    merged["year_end"] = merged["year_end"].astype(int)
+    result = merged.sort_values(
+        [*model_keys, "Const", "year_start", "year_end", "VERSION", "BackSize"],
+        kind="mergesort",
+    )[output_columns].reset_index(drop=True)
+
+    return result
+
+
+def transform_non_pickup(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Convert the non-pickup Power Query logic into compressed and intermediate tables."""
     require_columns(df)
 
     text_columns = ["主车型", "品牌", "车型名", "子车系", "分类", "结构", "版本", "年份区间", "对应尺码"]
@@ -276,7 +361,7 @@ def transform_non_pickup(df: pd.DataFrame) -> pd.DataFrame:
     ].copy()
 
     if work.empty:
-        return pd.DataFrame(columns=NON_PICKUP_FINAL_COLUMNS)
+        return pd.DataFrame(columns=NON_PICKUP_FINAL_COLUMNS), pd.DataFrame(columns=NON_PICKUP_INTERMEDIATE_COLUMNS)
 
     work["YEAR_LIST"] = work["年份区间"].map(parse_year_list)
     work = work.explode("YEAR_LIST")
@@ -308,13 +393,27 @@ def transform_non_pickup(df: pd.DataFrame) -> pd.DataFrame:
     for column in ["主车型", "BRAND", "MODEL", "SUB_MODEL", "Const", "VERSION_RAW", "BackSize", "原始年份列表"]:
         renamed[column] = renamed[column].map(normalize_text)
 
-    second_keys = ["主车型", "BRAND", "MODEL", "SUB_MODEL", "Const", "BackSize"]
+    compressed = build_non_pickup_compressed(renamed, include_sub_model=False)
+    intermediate = build_non_pickup_compressed(renamed, include_sub_model=True)
+    return compressed, intermediate
+
+
+def build_pickup_compressed(renamed: pd.DataFrame, include_sub_model: bool) -> pd.DataFrame:
+    model_keys = ["主车型", "BRAND", "MODEL"]
+    if include_sub_model:
+        model_keys.append("SUB_MODEL")
+
+    second_keys = [*model_keys, "Const", "CAB", "BED_FT", "BackSize"]
+    output_columns = PICKUP_INTERMEDIATE_COLUMNS if include_sub_model else PICKUP_FINAL_COLUMNS
+    if renamed.empty:
+        return pd.DataFrame(columns=output_columns)
+
     grouped = (
         renamed.groupby(second_keys, dropna=False, sort=False)
         .agg(
             year_start=("year_start", "min"),
             year_end=("year_end", "max"),
-            VERSION=("VERSION_RAW", combine_versions),
+            VERSION=("VERSION_RAW", combine_pickup_versions),
             原始年份列表=("原始年份列表", combine_year_text),
         )
         .reset_index()
@@ -328,13 +427,13 @@ def transform_non_pickup(df: pd.DataFrame) -> pd.DataFrame:
     )
     grouped["桥接状态"] = grouped["原始年份列表"].map(bridge_status)
 
-    sort_columns = ["主车型", "BRAND", "MODEL", "SUB_MODEL", "Const", "VERSION", "year_start", "year_end"]
+    sort_columns = [*model_keys, "Const", "CAB", "BED_FT", "VERSION", "year_start", "year_end"]
     grouped = grouped.sort_values(sort_columns, kind="mergesort").reset_index(drop=True)
 
-    excl_keys = ["主车型", "BRAND", "MODEL", "SUB_MODEL", "year_start", "year_end", "Const"]
+    excl_keys = [*model_keys, "year_start", "year_end", "Const", "CAB", "BED_FT"]
     excl_list = (
         grouped.groupby(excl_keys, dropna=False, sort=False)
-        .apply(build_excl_list)
+        .apply(build_pickup_excl_list)
         .reset_index(name="EXCL_LIST")
     )
 
@@ -350,18 +449,37 @@ def transform_non_pickup(df: pd.DataFrame) -> pd.DataFrame:
         return version
 
     merged["VERSION"] = merged.apply(update_version, axis=1)
-    merged["year_start"] = merged["year_start"].astype(int)
-    merged["year_end"] = merged["year_end"].astype(int)
-    result = merged.sort_values(
-        ["主车型", "BRAND", "MODEL", "SUB_MODEL", "Const", "year_start", "year_end", "VERSION", "BackSize"],
+
+    third_keys = [
+        *model_keys,
+        "year_start",
+        "year_end",
+        "YEAR",
+        "Const",
+        "VERSION",
+        "CAB",
+        "BackSize",
+        "桥接状态",
+        "原始年份列表",
+    ]
+    grouped_beds = (
+        merged.groupby(third_keys, dropna=False, sort=False)
+        .agg(BED_FT=("BED_FT", combine_bed_ft))
+        .reset_index()
+    )
+
+    grouped_beds["year_start"] = grouped_beds["year_start"].astype(int)
+    grouped_beds["year_end"] = grouped_beds["year_end"].astype(int)
+    result = grouped_beds.sort_values(
+        [*model_keys, "Const", "CAB", "BED_FT", "year_start", "year_end", "VERSION", "BackSize"],
         kind="mergesort",
-    )[NON_PICKUP_FINAL_COLUMNS].reset_index(drop=True)
+    )[output_columns].reset_index(drop=True)
 
     return result
 
 
-def transform_pickup(df: pd.DataFrame) -> pd.DataFrame:
-    """Convert the pickup Power Query logic into a pandas transformation."""
+def transform_pickup(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Convert the pickup Power Query logic into compressed and intermediate tables."""
     require_columns(df, PICKUP_REQUIRED_COLUMNS)
 
     text_columns = [
@@ -388,7 +506,7 @@ def transform_pickup(df: pd.DataFrame) -> pd.DataFrame:
     ].copy()
 
     if work.empty:
-        return pd.DataFrame(columns=PICKUP_FINAL_COLUMNS)
+        return pd.DataFrame(columns=PICKUP_FINAL_COLUMNS), pd.DataFrame(columns=PICKUP_INTERMEDIATE_COLUMNS)
 
     work["YEAR_LIST"] = work["年份区间"].map(parse_year_list)
     work = work.explode("YEAR_LIST")
@@ -433,115 +551,28 @@ def transform_pickup(df: pd.DataFrame) -> pd.DataFrame:
     ]:
         renamed[column] = renamed[column].map(normalize_text)
 
-    second_keys = ["主车型", "BRAND", "MODEL", "SUB_MODEL", "Const", "CAB", "BED_FT", "BackSize"]
-    grouped = (
-        renamed.groupby(second_keys, dropna=False, sort=False)
-        .agg(
-            year_start=("year_start", "min"),
-            year_end=("year_end", "max"),
-            VERSION=("VERSION_RAW", combine_pickup_versions),
-            原始年份列表=("原始年份列表", combine_year_text),
-        )
-        .reset_index()
-    )
-
-    grouped["YEAR"] = grouped.apply(
-        lambda row: str(int(row["year_start"]))
-        if row["year_start"] == row["year_end"]
-        else f"{int(row['year_start'])}-{int(row['year_end'])}",
-        axis=1,
-    )
-    grouped["桥接状态"] = grouped["原始年份列表"].map(bridge_status)
-
-    sort_columns = [
-        "主车型",
-        "BRAND",
-        "MODEL",
-        "SUB_MODEL",
-        "Const",
-        "CAB",
-        "BED_FT",
-        "VERSION",
-        "year_start",
-        "year_end",
-    ]
-    grouped = grouped.sort_values(sort_columns, kind="mergesort").reset_index(drop=True)
-
-    excl_keys = ["主车型", "BRAND", "MODEL", "SUB_MODEL", "year_start", "year_end", "Const", "CAB", "BED_FT"]
-    excl_list = (
-        grouped.groupby(excl_keys, dropna=False, sort=False)
-        .apply(build_pickup_excl_list)
-        .reset_index(name="EXCL_LIST")
-    )
-
-    merged = grouped.merge(excl_list, on=excl_keys, how="left")
-
-    def update_version(row: pd.Series) -> str:
-        version = normalize_text(row["VERSION"])
-        excl = normalize_text(row["EXCL_LIST"])
-        size = normalize_text(row["BackSize"])
-
-        if excl and size and size != "无可用尺码":
-            return f"EXCL: {excl}" if not version else f"{version} EXCL: {excl}"
-        return version
-
-    merged["VERSION"] = merged.apply(update_version, axis=1)
-
-    third_keys = [
-        "主车型",
-        "BRAND",
-        "MODEL",
-        "SUB_MODEL",
-        "year_start",
-        "year_end",
-        "YEAR",
-        "Const",
-        "VERSION",
-        "CAB",
-        "BackSize",
-        "桥接状态",
-        "原始年份列表",
-    ]
-    grouped_beds = (
-        merged.groupby(third_keys, dropna=False, sort=False)
-        .agg(BED_FT=("BED_FT", combine_bed_ft))
-        .reset_index()
-    )
-
-    grouped_beds["year_start"] = grouped_beds["year_start"].astype(int)
-    grouped_beds["year_end"] = grouped_beds["year_end"].astype(int)
-    result = grouped_beds.sort_values(
-        [
-            "主车型",
-            "BRAND",
-            "MODEL",
-            "SUB_MODEL",
-            "Const",
-            "CAB",
-            "BED_FT",
-            "year_start",
-            "year_end",
-            "VERSION",
-            "BackSize",
-        ],
-        kind="mergesort",
-    )[PICKUP_FINAL_COLUMNS].reset_index(drop=True)
-
-    return result
+    compressed = build_pickup_compressed(renamed, include_sub_model=False)
+    intermediate = build_pickup_compressed(renamed, include_sub_model=True)
+    return compressed, intermediate
 
 
 def transform(df: pd.DataFrame) -> pd.DataFrame:
     """Backward-compatible alias for the non-pickup table."""
-    return transform_non_pickup(df)
+    return transform_non_pickup(df)[0]
 
 
-def transform_all(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    return transform_non_pickup(df), transform_pickup(df)
+def transform_all(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    non_pickup_compressed, non_pickup_intermediate = transform_non_pickup(df)
+    pickup_compressed, pickup_intermediate = transform_pickup(df)
+    return non_pickup_compressed, pickup_compressed, non_pickup_intermediate, pickup_intermediate
 
 
-def transform_adapter(non_pickup_df: pd.DataFrame, pickup_df: pd.DataFrame) -> pd.DataFrame:
-    non_pickup_source = non_pickup_df[non_pickup_df["BackSize"] != "无可用尺码"][["SUB_MODEL", "YEAR", "BackSize"]]
-    pickup_source = pickup_df[pickup_df["BackSize"] != "无可用尺码"][["SUB_MODEL", "YEAR", "BackSize"]]
+def transform_adapter(non_pickup_intermediate: pd.DataFrame, pickup_intermediate: pd.DataFrame) -> pd.DataFrame:
+    adapter_columns = ["SUB_MODEL", "YEAR", "BackSize"]
+    non_pickup_source = non_pickup_intermediate[
+        non_pickup_intermediate["BackSize"] != "无可用尺码"
+    ][adapter_columns]
+    pickup_source = pickup_intermediate[pickup_intermediate["BackSize"] != "无可用尺码"][adapter_columns]
 
     combined = pd.concat([non_pickup_source, pickup_source], ignore_index=True)
     if combined.empty:
@@ -577,16 +608,18 @@ def transform_adapter(non_pickup_df: pd.DataFrame, pickup_df: pd.DataFrame) -> p
     return result
 
 
-def transform_all_outputs(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    non_pickup_df, pickup_df = transform_all(df)
-    adapter_df = transform_adapter(non_pickup_df, pickup_df)
-    return non_pickup_df, pickup_df, adapter_df
+def transform_all_outputs(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    non_pickup_compressed, pickup_compressed, non_pickup_intermediate, pickup_intermediate = transform_all(df)
+    adapter_df = transform_adapter(non_pickup_intermediate, pickup_intermediate)
+    return non_pickup_compressed, pickup_compressed, adapter_df, non_pickup_intermediate, pickup_intermediate
 
 
 def write_outputs(
     non_pickup_df: pd.DataFrame,
     pickup_df: pd.DataFrame,
     adapter_df: pd.DataFrame,
+    non_pickup_intermediate_df: pd.DataFrame,
+    pickup_intermediate_df: pd.DataFrame,
     input_path: Path,
     output_dir: Path,
 ) -> dict[str, Path]:
@@ -597,22 +630,30 @@ def write_outputs(
     non_pickup_tsv_path = run_output_dir / f"{stem}_非皮卡尺码压缩.tsv"
     pickup_tsv_path = run_output_dir / f"{stem}_皮卡尺码压缩.tsv"
     adapter_tsv_path = run_output_dir / f"{stem}_适配器.tsv"
+    non_pickup_intermediate_tsv_path = run_output_dir / f"{stem}_非皮卡中间压缩.tsv"
+    pickup_intermediate_tsv_path = run_output_dir / f"{stem}_皮卡中间压缩.tsv"
     xlsx_path = run_output_dir / f"{stem}_output.xlsx"
 
     non_pickup_df.to_csv(non_pickup_tsv_path, sep="\t", index=False, encoding="utf-8-sig")
     pickup_df.to_csv(pickup_tsv_path, sep="\t", index=False, encoding="utf-8-sig")
     adapter_df.to_csv(adapter_tsv_path, sep="\t", index=False, encoding="utf-8-sig")
+    non_pickup_intermediate_df.to_csv(non_pickup_intermediate_tsv_path, sep="\t", index=False, encoding="utf-8-sig")
+    pickup_intermediate_df.to_csv(pickup_intermediate_tsv_path, sep="\t", index=False, encoding="utf-8-sig")
 
     with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
         non_pickup_df.to_excel(writer, sheet_name="非皮卡", index=False)
         pickup_df.to_excel(writer, sheet_name="皮卡", index=False)
         adapter_df.to_excel(writer, sheet_name="适配器", index=False)
+        non_pickup_intermediate_df.to_excel(writer, sheet_name="非皮卡中间", index=False)
+        pickup_intermediate_df.to_excel(writer, sheet_name="皮卡中间", index=False)
 
     return {
         "output_dir": run_output_dir,
         "non_pickup_tsv": non_pickup_tsv_path,
         "pickup_tsv": pickup_tsv_path,
         "adapter_tsv": adapter_tsv_path,
+        "non_pickup_intermediate_tsv": non_pickup_intermediate_tsv_path,
+        "pickup_intermediate_tsv": pickup_intermediate_tsv_path,
         "xlsx": xlsx_path,
     }
 
@@ -643,16 +684,28 @@ def main() -> None:
         raise FileNotFoundError(f"Input file not found: {input_path}")
 
     df = read_tsv(input_path, encoding=args.encoding)
-    non_pickup_df, pickup_df, adapter_df = transform_all_outputs(df)
-    output_paths = write_outputs(non_pickup_df, pickup_df, adapter_df, input_path, args.output_dir)
+    non_pickup_df, pickup_df, adapter_df, non_pickup_intermediate, pickup_intermediate = transform_all_outputs(df)
+    output_paths = write_outputs(
+        non_pickup_df,
+        pickup_df,
+        adapter_df,
+        non_pickup_intermediate,
+        pickup_intermediate,
+        input_path,
+        args.output_dir,
+    )
 
     print(f"Non-pickup rows: {len(non_pickup_df)}")
     print(f"Pickup rows: {len(pickup_df)}")
     print(f"Adapter rows: {len(adapter_df)}")
+    print(f"Non-pickup intermediate rows: {len(non_pickup_intermediate)}")
+    print(f"Pickup intermediate rows: {len(pickup_intermediate)}")
     print(f"Output dir: {output_paths['output_dir']}")
     print(f"Non-pickup TSV: {output_paths['non_pickup_tsv']}")
     print(f"Pickup TSV: {output_paths['pickup_tsv']}")
     print(f"Adapter TSV: {output_paths['adapter_tsv']}")
+    print(f"Non-pickup intermediate TSV: {output_paths['non_pickup_intermediate_tsv']}")
+    print(f"Pickup intermediate TSV: {output_paths['pickup_intermediate_tsv']}")
     print(f"Excel: {output_paths['xlsx']}")
 
 
