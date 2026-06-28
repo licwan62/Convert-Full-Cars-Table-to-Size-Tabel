@@ -101,12 +101,17 @@ def split_tokens(value: object, separator: str = "/") -> set[str]:
     return {normalize_text(part) for part in text.split(separator) if normalize_text(part)}
 
 
+def protect_version_slashes(text: str) -> str:
+    return re.sub(r"\b([A-Za-z])\s*/\s*([A-Za-z])\b", r"\1__VERSION_SLASH__\2", text)
+
+
 def split_version_tokens(value: object) -> set[str]:
     text = normalize_text(value)
     if not text:
         return set()
     text = re.sub(r"\b(?:INCL|Incl|incl|EXCL|Excl|excl|EXP|Exp|exp)\s*:", "", text)
-    return split_tokens(text)
+    text = protect_version_slashes(text)
+    return {token.replace("__VERSION_SLASH__", "/") for token in split_tokens(text)}
 
 
 def record_version_matches(record_version: object, atom_version: object) -> bool:

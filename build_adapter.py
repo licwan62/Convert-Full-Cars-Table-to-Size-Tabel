@@ -258,7 +258,7 @@ def load_fitments_fact_table(
     return fact_df
 
 
-def build_raw_adapter(df: pd.DataFrame) -> pd.DataFrame:
+def build_raw_adapter(df: pd.DataFrame, remove_null_size: bool = False) -> pd.DataFrame:
     df = normalize_input_schema(df)
     if not has_columns(df, ADAPTER_REQUIRED_COLUMNS):
         return empty_adapter()
@@ -271,12 +271,10 @@ def build_raw_adapter(df: pd.DataFrame) -> pd.DataFrame:
         bad_count = int((work["年份区间"] == "").sum())
         raise ValueError(f"适配器存在 {bad_count} 行年份区间为空，请补齐年份区间后再生成适配器。")
 
-    work = work[
-        (work["子车系"] != "")
-        & (work["年份区间"] != "")
-        & (work[BACKSIZE_SOURCE_COLUMN] != "")
-        & (work[BACKSIZE_SOURCE_COLUMN] != "无可用尺码")
-    ].copy()
+    size_mask = work[BACKSIZE_SOURCE_COLUMN] != ""
+    if remove_null_size:
+        size_mask &= work[BACKSIZE_SOURCE_COLUMN] != "无可用尺码"
+    work = work[(work["子车系"] != "") & (work["年份区间"] != "") & size_mask].copy()
     if work.empty:
         return empty_adapter()
 
@@ -346,8 +344,9 @@ def build_adapter_outputs(
     sub_model_fact_output_path: Path | None = DEFAULT_SUB_MODEL_FACT_OUTPUT_PATH,
     fitments_fact_output_path: Path | None = DEFAULT_FITMENTS_FACT_OUTPUT_PATH,
     encoding: str = "utf-8-sig",
+    remove_null_size: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    raw_adapter = build_raw_adapter(df)
+    raw_adapter = build_raw_adapter(df, remove_null_size=remove_null_size)
     sub_model_fact_df = load_sub_model_fact_table(
         sub_model_path=sub_model_path,
         fact_output_path=sub_model_fact_output_path,
@@ -382,6 +381,7 @@ def transform_adapter(
     sub_model_fact_output_path: Path | None = DEFAULT_SUB_MODEL_FACT_OUTPUT_PATH,
     fitments_fact_output_path: Path | None = DEFAULT_FITMENTS_FACT_OUTPUT_PATH,
     encoding: str = "utf-8-sig",
+    remove_null_size: bool = False,
 ) -> pd.DataFrame:
     return build_adapter_outputs(
         df,
@@ -390,6 +390,7 @@ def transform_adapter(
         sub_model_fact_output_path=sub_model_fact_output_path,
         fitments_fact_output_path=fitments_fact_output_path,
         encoding=encoding,
+        remove_null_size=remove_null_size,
     )[0]
 
 
@@ -433,6 +434,11 @@ def parse_args() -> argparse.Namespace:
         default="utf-8-sig",
         help="Input file encoding. Defaults to utf-8-sig.",
     )
+    parser.add_argument(
+        "--remove-null-size",
+        action="store_true",
+        help="Filter out rows whose size is 无可用尺码. By default these rows are kept.",
+    )
     return parser.parse_args()
 
 
@@ -461,6 +467,7 @@ def main() -> None:
         sub_model_fact_output_path=sub_model_fact_output,
         fitments_fact_output_path=fitments_fact_output,
         encoding=args.encoding,
+        remove_null_size=args.remove_null_size,
     )
 
     adapter_path = adapter_dir / f"{input_path.stem}_适配器.tsv"

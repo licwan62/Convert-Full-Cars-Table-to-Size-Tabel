@@ -147,8 +147,6 @@ LOG_FINAL_COLUMNS = [
     "原因",
 ]
 LEGACY_FRONT_MODEL_COLUMNS = ["车型名", "车姓名"]
-SHORT_MODEL_SOURCE_COLUMN = "SHORT-MODEL"
-SHORT_CAB_SOURCE_COLUMN = "SHORT-CAB"
 
 
 class ProgressReporter:
@@ -277,16 +275,6 @@ def normalize_input_schema(df: pd.DataFrame) -> pd.DataFrame:
             if legacy_column in work.columns:
                 work["前台车型"] = work[legacy_column]
                 break
-    if SHORT_MODEL_SOURCE_COLUMN in work.columns:
-        short_model = work[SHORT_MODEL_SOURCE_COLUMN].map(normalize_text)
-        if "前台车型" not in work.columns:
-            work["前台车型"] = ""
-        work["前台车型"] = short_model.where(short_model != "", work["前台车型"])
-    if SHORT_CAB_SOURCE_COLUMN in work.columns:
-        short_cab = work[SHORT_CAB_SOURCE_COLUMN].map(normalize_text)
-        if "驾驶室类型" not in work.columns:
-            work["驾驶室类型"] = ""
-        work["驾驶室类型"] = short_cab.where(short_cab != "", work["驾驶室类型"])
     if "主车型" not in work.columns and {"品牌", "前台车型"}.issubset(work.columns):
         work["主车型"] = work.apply(
             lambda row: " ".join(
@@ -431,10 +419,11 @@ def split_version_tokens(value: object) -> list[str]:
         return []
 
     text = re.sub(r"\b(?:INCL|Incl|incl|EXCL|Excl|excl|EXP|Exp|exp)\s*:", "", text)
+    text = re.sub(r"\b([A-Za-z])\s*/\s*([A-Za-z])\b", r"\1__VERSION_SLASH__\2", text)
     result: list[str] = []
     seen: set[str] = set()
     for part in text.split("/"):
-        version = normalize_text(part)
+        version = normalize_text(part).replace("__VERSION_SLASH__", "/")
         if version and version not in seen:
             seen.add(version)
             result.append(version)
@@ -1795,6 +1784,7 @@ def build_non_pickup_compressed(renamed: pd.DataFrame) -> tuple[pd.DataFrame, pd
 def transform_non_pickup(
     df: pd.DataFrame,
     progress: ProgressReporter | None = None,
+    remove_null_size: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Convert non-pickup rows into lossless and high-compression tables."""
     df = normalize_input_schema(df)
@@ -1828,7 +1818,10 @@ def transform_non_pickup(
     else:
         non_pickup_mask = (work["驾驶室类型"] == "") & (work["货斗长度_ft"] == "")
 
-    work = work[non_pickup_mask & (work[BACKSIZE_SOURCE_COLUMN] != "")].copy()
+    size_mask = work[BACKSIZE_SOURCE_COLUMN] != ""
+    if remove_null_size:
+        size_mask &= work[BACKSIZE_SOURCE_COLUMN] != "无可用尺码"
+    work = work[non_pickup_mask & size_mask].copy()
     if (work["年份区间"] == "").any():
         bad_count = int((work["年份区间"] == "").sum())
         raise ValueError(f"非皮卡存在 {bad_count} 行年份区间为空，请补齐年份区间后再压缩。")
@@ -2384,6 +2377,7 @@ def build_pickup_specificity_compressed(renamed: pd.DataFrame) -> pd.DataFrame:
 def transform_pickup(
     df: pd.DataFrame,
     progress: ProgressReporter | None = None,
+    remove_null_size: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Convert pickup rows into lossless and specificity-preserving compressed tables."""
     df = normalize_input_schema(df)
@@ -2413,7 +2407,10 @@ def transform_pickup(
     else:
         pickup_mask = (work["驾驶室类型"] != "") | (work["货斗长度_ft"] != "")
 
-    work = work[pickup_mask & (work[BACKSIZE_SOURCE_COLUMN] != "")].copy()
+    size_mask = work[BACKSIZE_SOURCE_COLUMN] != ""
+    if remove_null_size:
+        size_mask &= work[BACKSIZE_SOURCE_COLUMN] != "无可用尺码"
+    work = work[pickup_mask & size_mask].copy()
     if (work["年份区间"] == "").any():
         bad_count = int((work["年份区间"] == "").sum())
         raise ValueError(f"皮卡存在 {bad_count} 行年份区间为空，请补齐年份区间后再压缩。")
@@ -2516,9 +2513,18 @@ def transform(df: pd.DataFrame) -> pd.DataFrame:
 def transform_all(
     df: pd.DataFrame,
     progress: ProgressReporter | None = None,
+    remove_null_size: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    non_pickup_lossless, non_pickup_high, non_pickup_higher = transform_non_pickup(df, progress=progress)
-    pickup_lossless, pickup_specificity = transform_pickup(df, progress=progress)
+    non_pickup_lossless, non_pickup_high, non_pickup_higher = transform_non_pickup(
+        df,
+        progress=progress,
+        remove_null_size=remove_null_size,
+    )
+    pickup_lossless, pickup_specificity = transform_pickup(
+        df,
+        progress=progress,
+        remove_null_size=remove_null_size,
+    )
     return non_pickup_lossless, non_pickup_high, non_pickup_higher, pickup_lossless, pickup_specificity
 
 
@@ -2559,6 +2565,7 @@ def build_compression_log(non_pickup_higher: pd.DataFrame, pickup_specificity: p
 def transform_all_outputs(
     df: pd.DataFrame,
     with_adapter: bool = False,
+    remove_null_size: bool = False,
     sub_model_path: Path = DEFAULT_SUB_MODEL_PATH,
     fitments_path: Path = DEFAULT_FITMENTS_PATH,
     sub_model_fact_output_path: Path | None = DEFAULT_SUB_MODEL_FACT_OUTPUT_PATH,
@@ -2581,6 +2588,7 @@ def transform_all_outputs(
     non_pickup_lossless, non_pickup_high, non_pickup_higher, pickup_lossless, pickup_specificity = transform_all(
         df,
         progress=progress,
+        remove_null_size=remove_null_size,
     )
     if with_adapter:
         adapter_df, adapter_log_df, sub_model_fact_df, fitments_fact_df = build_adapter_outputs(
@@ -2590,6 +2598,7 @@ def transform_all_outputs(
             sub_model_fact_output_path=sub_model_fact_output_path,
             fitments_fact_output_path=fitments_fact_output_path,
             encoding=encoding,
+            remove_null_size=remove_null_size,
         )
     else:
         adapter_df = empty_adapter()
@@ -2850,6 +2859,11 @@ def parse_args() -> argparse.Namespace:
         help="Also generate adapter TSV with sub_model and fitments fact checks.",
     )
     parser.add_argument(
+        "--remove-null-size",
+        action="store_true",
+        help="Filter out rows whose size is 无可用尺码. By default these rows are kept.",
+    )
+    parser.add_argument(
         "--sub-model",
         dest="sub_model",
         type=Path,
@@ -2906,6 +2920,7 @@ def main() -> None:
     ) = transform_all_outputs(
         df,
         with_adapter=args.with_adapter,
+        remove_null_size=args.remove_null_size,
         sub_model_path=args.sub_model.resolve(),
         fitments_path=args.fitments.resolve(),
         sub_model_fact_output_path=adapter_dir / "submodels_adapter_fact.tsv" if args.with_adapter else None,
