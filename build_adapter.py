@@ -7,6 +7,8 @@ import unicodedata
 
 import pandas as pd
 
+from field_profile import apply_field_profile, load_field_profile
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "output"
@@ -116,30 +118,8 @@ def split_model_raw_list(value: object) -> list[str]:
     return result
 
 
-def normalize_input_schema(df: pd.DataFrame) -> pd.DataFrame:
-    work = df.copy()
-    work.columns = [normalize_text(column) for column in work.columns]
-    if "前台车型" not in work.columns:
-        for legacy_column in LEGACY_FRONT_MODEL_COLUMNS:
-            if legacy_column in work.columns:
-                work["前台车型"] = work[legacy_column]
-                break
-    if "主车型" not in work.columns and {"品牌", "前台车型"}.issubset(work.columns):
-        work["主车型"] = work.apply(
-            lambda row: " ".join(
-                part
-                for part in [normalize_text(row.get("品牌", "")), normalize_text(row.get("前台车型", ""))]
-                if part
-            ),
-            axis=1,
-        )
-    if BACKSIZE_SOURCE_COLUMN not in work.columns and "对应尺码" in work.columns:
-        work[BACKSIZE_SOURCE_COLUMN] = work["对应尺码"]
-    if "分类" not in work.columns:
-        work["分类"] = ""
-    if "门数" not in work.columns:
-        work["门数"] = ""
-    return work
+def normalize_input_schema(df: pd.DataFrame, field_profile: dict[str, object] | None = None) -> pd.DataFrame:
+    return apply_field_profile(df, field_profile)
 
 
 def require_columns(df: pd.DataFrame, required_columns: list[str]) -> None:
@@ -258,8 +238,12 @@ def load_fitments_fact_table(
     return fact_df
 
 
-def build_raw_adapter(df: pd.DataFrame, remove_null_size: bool = False) -> pd.DataFrame:
-    df = normalize_input_schema(df)
+def build_raw_adapter(
+    df: pd.DataFrame,
+    remove_null_size: bool = False,
+    field_profile: dict[str, object] | None = None,
+) -> pd.DataFrame:
+    df = normalize_input_schema(df, field_profile=field_profile)
     if not has_columns(df, ADAPTER_REQUIRED_COLUMNS):
         return empty_adapter()
     require_columns(df, ADAPTER_REQUIRED_COLUMNS)
@@ -345,8 +329,9 @@ def build_adapter_outputs(
     fitments_fact_output_path: Path | None = DEFAULT_FITMENTS_FACT_OUTPUT_PATH,
     encoding: str = "utf-8-sig",
     remove_null_size: bool = False,
+    field_profile: dict[str, object] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    raw_adapter = build_raw_adapter(df, remove_null_size=remove_null_size)
+    raw_adapter = build_raw_adapter(df, remove_null_size=remove_null_size, field_profile=field_profile)
     sub_model_fact_df = load_sub_model_fact_table(
         sub_model_path=sub_model_path,
         fact_output_path=sub_model_fact_output_path,
@@ -382,6 +367,7 @@ def transform_adapter(
     fitments_fact_output_path: Path | None = DEFAULT_FITMENTS_FACT_OUTPUT_PATH,
     encoding: str = "utf-8-sig",
     remove_null_size: bool = False,
+    field_profile: dict[str, object] | None = None,
 ) -> pd.DataFrame:
     return build_adapter_outputs(
         df,
@@ -391,6 +377,7 @@ def transform_adapter(
         fitments_fact_output_path=fitments_fact_output_path,
         encoding=encoding,
         remove_null_size=remove_null_size,
+        field_profile=field_profile,
     )[0]
 
 
@@ -435,6 +422,12 @@ def parse_args() -> argparse.Namespace:
         help="Input file encoding. Defaults to utf-8-sig.",
     )
     parser.add_argument(
+        "--field-profile",
+        type=Path,
+        default=None,
+        help="YAML file that maps input column names to the script's standard fields.",
+    )
+    parser.add_argument(
         "--remove-null-size",
         action="store_true",
         help="Filter out rows whose size is 无可用尺码. By default these rows are kept.",
@@ -459,6 +452,7 @@ def main() -> None:
         else adapter_dir / "fitments_adapter_fact.tsv"
     )
 
+    field_profile = load_field_profile(args.field_profile.resolve() if args.field_profile else None)
     df = read_tsv(input_path, encoding=args.encoding)
     adapter_df, adapter_log_df, sub_model_fact_df, fitments_fact_df = build_adapter_outputs(
         df,
@@ -468,6 +462,7 @@ def main() -> None:
         fitments_fact_output_path=fitments_fact_output,
         encoding=args.encoding,
         remove_null_size=args.remove_null_size,
+        field_profile=field_profile,
     )
 
     adapter_path = adapter_dir / f"{input_path.stem}_适配器.tsv"

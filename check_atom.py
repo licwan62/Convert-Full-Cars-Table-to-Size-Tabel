@@ -8,6 +8,11 @@ import unicodedata
 
 import pandas as pd
 
+from non_pickup_validation import (
+    non_pickup_atom_matches,
+    split_model_expression,
+)
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "output"
@@ -206,6 +211,18 @@ def atom_key(row: pd.Series) -> tuple[str, ...]:
     return tuple(normalize_text(row.get(column, "")) for column in ATOM_MATCH_KEY_COLUMNS)
 
 
+def brand_model_key(row: pd.Series) -> tuple[str, str]:
+    return (normalize_text(row.get("MAKE", "")), normalize_text(row.get("MODEL", "")))
+
+
+def is_non_pickup_atom(row: pd.Series) -> bool:
+    return not normalize_text(row.get("CAB", "")) and not normalize_text(row.get("BED_FT", ""))
+
+
+def is_non_pickup_record(row: pd.Series) -> bool:
+    return not normalize_text(row.get("CAB", "")) and not normalize_text(row.get("BED_FT", ""))
+
+
 def compress_summary(line_no: int, record: pd.Series) -> str:
     return (
         f"{line_no}: {normalize_text(record.get('MAKE', ''))} {normalize_text(record.get('MODEL', ''))} "
@@ -244,6 +261,64 @@ def expand_compress_atoms(
     return pd.DataFrame(rows).drop_duplicates().reset_index(drop=True)
 
 
+def build_non_pickup_record_lookup(compress_df: pd.DataFrame) -> dict[tuple[str, str], pd.DataFrame]:
+    grouped_records: dict[tuple[str, str], list[dict[str, object]]] = {}
+    for record_index, record in compress_df.iterrows():
+        if not is_non_pickup_record(record):
+            continue
+        make = normalize_text(record.get("MAKE", ""))
+        models = split_model_expression(record.get("MODEL", "")) or [normalize_text(record.get("MODEL", ""))]
+        for model in models:
+            key = (make, model)
+            item = record.to_dict()
+            item["_compress_line_no"] = int(record_index) + 2
+            item["_compress_summary"] = compress_summary(int(record_index) + 2, record)
+            grouped_records.setdefault(key, []).append(item)
+    return {key: pd.DataFrame(records) for key, records in grouped_records.items()}
+
+
+def build_non_pickup_atom_check_row(atom_index: object, atom: pd.Series, records: pd.DataFrame) -> dict[str, object]:
+    matches = non_pickup_atom_matches(records, atom) if not records.empty else []
+    matched_line_numbers: list[str] = []
+    matched_sizes: list[str] = []
+    match_lines: list[str] = []
+    for record_index, size in matches:
+        record = records.loc[record_index]
+        matched_line_numbers.append(str(record.get("_compress_line_no", "")))
+        matched_sizes.append(normalize_text(size))
+        match_lines.append(normalize_text(record.get("_compress_summary", "")))
+
+    match_count = len(matches)
+    unique_sizes = sorted(set(matched_sizes))
+    atom_size = normalize_text(atom.get("BACKSIZE", ""))
+    if match_count == 0:
+        result = "MISS"
+    elif match_count == 1 and unique_sizes == [atom_size]:
+        result = "OK"
+    elif atom_size not in unique_sizes:
+        result = "SIZE_MISMATCH"
+    else:
+        result = "MULTI"
+
+    return {
+        "原子行号": int(atom_index) + 2,
+        "压缩命中数": match_count,
+        "检查结果": result,
+        "压缩行号": "/".join(matched_line_numbers),
+        "命中尺码": "/".join(unique_sizes),
+        "压缩类型": normalize_text(atom.get("压缩类型", "")),
+        "MAKE": normalize_text(atom.get("MAKE", "")),
+        "MODEL": normalize_text(atom.get("MODEL", "")),
+        "YEAR": normalize_text(atom.get("YEAR", "")),
+        "VERSION": normalize_text(atom.get("VERSION", "")),
+        "CONST": normalize_text(atom.get("CONST", "")),
+        "CAB": normalize_text(atom.get("CAB", "")),
+        "BED_FT": normalize_text(atom.get("BED_FT", "")),
+        "BACKSIZE": atom_size,
+        "命中压缩行": " || ".join(match_lines),
+    }
+
+
 def build_atom_check(
     atom_df: pd.DataFrame,
     compress_df: pd.DataFrame,
@@ -254,7 +329,10 @@ def build_atom_check(
     compress_df = normalize_schema(compress_df)
     if progress:
         progress.start(progress_phase, len(compress_df) + len(atom_df), unit_label="行")
-    expanded_compress_df = expand_compress_atoms(atom_df, compress_df, progress=progress)
+    non_pickup_lookup = build_non_pickup_record_lookup(compress_df)
+    pickup_atoms = atom_df[~atom_df.apply(is_non_pickup_atom, axis=1)]
+    pickup_compress = compress_df[~compress_df.apply(is_non_pickup_record, axis=1)]
+    expanded_compress_df = expand_compress_atoms(pickup_atoms, pickup_compress, progress=progress)
     rows: list[dict[str, object]] = []
     completed_offset = len(compress_df)
     for completed_count, (atom_index, atom) in enumerate(atom_df.iterrows(), start=1):
@@ -264,6 +342,11 @@ def build_atom_check(
                 current_model=atom.get("MODEL", ""),
                 completed_models=completed_offset + completed_count,
             )
+        if is_non_pickup_atom(atom):
+            records = non_pickup_lookup.get(brand_model_key(atom), pd.DataFrame())
+            rows.append(build_non_pickup_atom_check_row(atom_index, atom, records))
+            continue
+
         key = atom_key(atom)
         if expanded_compress_df.empty:
             matched_rows = expanded_compress_df

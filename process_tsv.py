@@ -19,6 +19,11 @@ from build_adapter import (
     empty_adapter_log,
 )
 from check_atom import build_atom_check
+from field_profile import apply_field_profile, load_field_profile
+from non_pickup_validation import (
+    non_pickup_atoms_in_record_scope,
+    non_pickup_candidate_validation_reason,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -50,7 +55,6 @@ ADAPTER_REQUIRED_COLUMNS = [
     "年份区间",
     BACKSIZE_SOURCE_COLUMN,
 ]
-DOOR_SOURCE_COLUMN = "门数"
 NON_PICKUP_FINAL_COLUMNS = [
     "主车型",
     "BRAND",
@@ -266,31 +270,9 @@ def model_combo_group(brand: object, model: object) -> str:
     return load_model_combo_map().get((brand_text.casefold(), model_text.casefold()), model_text)
 
 
-def normalize_input_schema(df: pd.DataFrame) -> pd.DataFrame:
+def normalize_input_schema(df: pd.DataFrame, field_profile: dict[str, object] | None = None) -> pd.DataFrame:
     """Normalize historical column names to the current allcars schema."""
-    work = df.copy()
-    work.columns = [normalize_text(column) for column in work.columns]
-    if "前台车型" not in work.columns:
-        for legacy_column in LEGACY_FRONT_MODEL_COLUMNS:
-            if legacy_column in work.columns:
-                work["前台车型"] = work[legacy_column]
-                break
-    if "主车型" not in work.columns and {"品牌", "前台车型"}.issubset(work.columns):
-        work["主车型"] = work.apply(
-            lambda row: " ".join(
-                part
-                for part in [normalize_text(row.get("品牌", "")), normalize_text(row.get("前台车型", ""))]
-                if part
-            ),
-            axis=1,
-        )
-    if BACKSIZE_SOURCE_COLUMN not in work.columns and "对应尺码" in work.columns:
-        work[BACKSIZE_SOURCE_COLUMN] = work["对应尺码"]
-    if "分类" not in work.columns:
-        work["分类"] = ""
-    if DOOR_SOURCE_COLUMN not in work.columns:
-        work[DOOR_SOURCE_COLUMN] = ""
-    return work
+    return apply_field_profile(df, field_profile)
 
 
 def normalize_text(value: object) -> str:
@@ -386,6 +368,31 @@ def join_unique(values: list[str]) -> str:
                 seen.add(text)
                 result.append(text)
     return "/".join(result)
+
+
+def text_sort_key(value: object) -> tuple[tuple[int, object], ...]:
+    text = normalize_text(value)
+    parts: list[tuple[int, object]] = []
+    for part in re.split(r"(\d+)", text.casefold()):
+        if not part:
+            continue
+        if part.isdigit():
+            parts.append((0, int(part)))
+        else:
+            parts.append((1, part))
+    return tuple(parts)
+
+
+def join_unique_sorted(values: list[str]) -> str:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for part in normalize_text(value).split("/"):
+            text = normalize_text(part)
+            if text and text not in seen:
+                seen.add(text)
+                result.append(text)
+    return "/".join(sorted(result, key=text_sort_key))
 
 
 def split_joined_text(value: object) -> set[str]:
@@ -502,8 +509,8 @@ def append_excl(version: object, excl_list: object) -> str:
 
 def build_version_text(incl_versions: list[str], excl_versions: list[str]) -> str:
     parts: list[str] = []
-    incl = join_unique(incl_versions)
-    excl = join_unique(excl_versions)
+    incl = join_unique_sorted(incl_versions)
+    excl = join_unique_sorted(excl_versions)
     if incl:
         parts.append(f"Incl: {incl}")
     if excl:
@@ -866,6 +873,7 @@ def combine_lossy_versions(values: list[object]) -> str:
             if token not in seen:
                 seen.add(token)
                 tokens.append(token)
+    tokens = sorted(tokens, key=text_sort_key)
     if has_base and tokens:
         return f"Incl: {'/'.join(tokens)}"
     return "/".join(tokens)
@@ -1041,40 +1049,6 @@ def build_non_pickup_lossless_new(atoms: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(records).sort_values(["BRAND", "MODEL", "START_YEAR", "year_start", "BACKSIZE", "CONST", "VERSION"], kind="mergesort").reset_index(drop=True)
 
 
-def non_pickup_record_matches_atom_size(record: pd.Series, atom: pd.Series) -> str | None:
-    if normalize_text(record["BRAND"]) != normalize_text(atom["BRAND"]):
-        return None
-    if not model_expression_matches(record["MODEL"], atom["MODEL"]):
-        return None
-    atom_year = int(atom["YEAR_SINGLE"])
-    if not (int(record["year_start"]) <= atom_year <= int(record["year_end"])):
-        return None
-
-    record_consts = split_output_tokens(record.get("CONST", "")) or split_output_tokens(record.get("RAW-CONST", ""))
-    atom_const = normalize_text(atom["Const"])
-    if record_consts and atom_const not in record_consts:
-        return None
-    if not record_version_matches(record.get("VERSION", ""), atom.get("VERSION_RAW", "")):
-        return None
-    return normalize_text(record["BACKSIZE"])
-
-
-def non_pickup_candidate_validation_reason(records: pd.DataFrame, atoms: pd.DataFrame) -> str:
-    for _, atom in atoms.iterrows():
-        matched_sizes: list[str] = []
-        for _, record in records.iterrows():
-            size = non_pickup_record_matches_atom_size(record, atom)
-            if size:
-                matched_sizes.append(size)
-        if len(matched_sizes) > 1:
-            return f"{normalize_text(atom['BRAND'])} {normalize_text(atom['MODEL'])} {int(atom['YEAR_SINGLE'])} {normalize_text(atom['Const'])} 原子事实对应多条候选记录"
-        if not matched_sizes:
-            return f"{normalize_text(atom['BRAND'])} {normalize_text(atom['MODEL'])} {int(atom['YEAR_SINGLE'])} {normalize_text(atom['Const'])} 原子事实未被候选记录覆盖"
-        if matched_sizes[0] != normalize_text(atom["BackSize"]):
-            return f"{normalize_text(atom['BRAND'])} {normalize_text(atom['MODEL'])} {int(atom['YEAR_SINGLE'])} 命中尺码 {matched_sizes[0]} != 原子尺码 {normalize_text(atom['BackSize'])}"
-    return ""
-
-
 def merge_non_pickup_high_records(left: pd.Series, right: pd.Series) -> dict[str, object]:
     brand = normalize_text(left["BRAND"])
     model = combine_model_expression_for_brand(brand, [left["MODEL"], right["MODEL"]])
@@ -1086,7 +1060,7 @@ def merge_non_pickup_high_records(left: pd.Series, right: pd.Series) -> dict[str
         start,
         end,
         normalize_text(left["BACKSIZE"]),
-        join_unique([normalize_text(left.get("CONST", "")), normalize_text(right.get("CONST", ""))]),
+        join_unique_sorted([normalize_text(left.get("CONST", "")), normalize_text(right.get("CONST", ""))]),
         combine_lossy_versions([left.get("VERSION", ""), right.get("VERSION", "")]),
     )
 
@@ -1146,7 +1120,12 @@ def build_non_pickup_high_new(
                         merged,
                     ]
                     candidate = pd.DataFrame(candidate_rows, columns=working.columns)
-                    reason = non_pickup_candidate_validation_reason(candidate, atoms_group)
+                    scoped_atoms = non_pickup_atoms_in_record_scope(atoms_group, merged)
+                    reason = (
+                        "候选合并范围内没有可验证原子事实"
+                        if scoped_atoms.empty
+                        else non_pickup_candidate_validation_reason(candidate, scoped_atoms)
+                    )
                     log_base = {
                         "压缩类型": "非皮卡",
                         "阶段": "高度压缩两两组合",
@@ -1289,7 +1268,7 @@ def combine_non_pickup_versions(values: list[object]) -> str:
 
     if has_base:
         return build_version_text(incl_tokens, excl_tokens)
-    return "/".join(incl_tokens)
+    return "/".join(sorted(incl_tokens, key=text_sort_key))
 
 
 def merge_non_pickup_specificity_records(left: pd.Series, right: pd.Series) -> dict[str, object]:
@@ -1300,8 +1279,8 @@ def merge_non_pickup_specificity_records(left: pd.Series, right: pd.Series) -> d
         "BRAND": left["BRAND"],
         "MODEL": left["MODEL"],
         "YEAR": format_year_range([start, end]),
-        "CONST": join_unique([normalize_text(left.get("CONST", "")), normalize_text(right.get("CONST", ""))]),
-        "RAW-CONST": join_unique([normalize_text(left.get("RAW-CONST", "")), normalize_text(right.get("RAW-CONST", ""))]),
+        "CONST": join_unique_sorted([normalize_text(left.get("CONST", "")), normalize_text(right.get("CONST", ""))]),
+        "RAW-CONST": join_unique_sorted([normalize_text(left.get("RAW-CONST", "")), normalize_text(right.get("RAW-CONST", ""))]),
         "VERSION": combine_non_pickup_versions([left.get("VERSION", ""), right.get("VERSION", "")]),
         "BACKSIZE": left["BACKSIZE"],
         "DOOR_KEY": "",
@@ -1785,9 +1764,10 @@ def transform_non_pickup(
     df: pd.DataFrame,
     progress: ProgressReporter | None = None,
     remove_null_size: bool = False,
+    field_profile: dict[str, object] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Convert non-pickup rows into lossless and high-compression tables."""
-    df = normalize_input_schema(df)
+    df = normalize_input_schema(df, field_profile=field_profile)
     if not has_columns(df, NON_PICKUP_REQUIRED_COLUMNS):
         return empty_non_pickup_result()
     require_columns(df, NON_PICKUP_REQUIRED_COLUMNS)
@@ -1805,8 +1785,6 @@ def transform_non_pickup(
         "驾驶室类型",
         "货斗长度_ft",
     ]
-    if DOOR_SOURCE_COLUMN in df.columns:
-        text_columns.append(DOOR_SOURCE_COLUMN)
     work = df.copy()
     for column in text_columns:
         if column not in work.columns:
@@ -2378,9 +2356,10 @@ def transform_pickup(
     df: pd.DataFrame,
     progress: ProgressReporter | None = None,
     remove_null_size: bool = False,
+    field_profile: dict[str, object] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Convert pickup rows into lossless and specificity-preserving compressed tables."""
-    df = normalize_input_schema(df)
+    df = normalize_input_schema(df, field_profile=field_profile)
     if not has_columns(df, PICKUP_REQUIRED_COLUMNS):
         return empty_pickup_result()
     require_columns(df, PICKUP_REQUIRED_COLUMNS)
@@ -2514,16 +2493,19 @@ def transform_all(
     df: pd.DataFrame,
     progress: ProgressReporter | None = None,
     remove_null_size: bool = False,
+    field_profile: dict[str, object] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     non_pickup_lossless, non_pickup_high, non_pickup_higher = transform_non_pickup(
         df,
         progress=progress,
         remove_null_size=remove_null_size,
+        field_profile=field_profile,
     )
     pickup_lossless, pickup_specificity = transform_pickup(
         df,
         progress=progress,
         remove_null_size=remove_null_size,
+        field_profile=field_profile,
     )
     return non_pickup_lossless, non_pickup_high, non_pickup_higher, pickup_lossless, pickup_specificity
 
@@ -2572,6 +2554,7 @@ def transform_all_outputs(
     fitments_fact_output_path: Path | None = DEFAULT_FITMENTS_FACT_OUTPUT_PATH,
     encoding: str = "utf-8-sig",
     progress: ProgressReporter | None = None,
+    field_profile: dict[str, object] | None = None,
 ) -> tuple[
     pd.DataFrame,
     pd.DataFrame,
@@ -2589,6 +2572,7 @@ def transform_all_outputs(
         df,
         progress=progress,
         remove_null_size=remove_null_size,
+        field_profile=field_profile,
     )
     if with_adapter:
         adapter_df, adapter_log_df, sub_model_fact_df, fitments_fact_df = build_adapter_outputs(
@@ -2599,6 +2583,7 @@ def transform_all_outputs(
             fitments_fact_output_path=fitments_fact_output_path,
             encoding=encoding,
             remove_null_size=remove_null_size,
+            field_profile=field_profile,
         )
     else:
         adapter_df = empty_adapter()
@@ -2854,6 +2839,12 @@ def parse_args() -> argparse.Namespace:
         help="Input file encoding. Defaults to utf-8-sig.",
     )
     parser.add_argument(
+        "--field-profile",
+        type=Path,
+        default=None,
+        help="YAML file that maps input column names to the script's standard fields.",
+    )
+    parser.add_argument(
         "--with-adapter",
         action="store_true",
         help="Also generate adapter TSV with sub_model and fitments fact checks.",
@@ -2902,6 +2893,7 @@ def main() -> None:
     if not input_path.exists():
         raise FileNotFoundError(f"Input file not found: {input_path}")
 
+    field_profile = load_field_profile(args.field_profile.resolve() if args.field_profile else None)
     df = read_tsv(input_path, encoding=args.encoding)
     adapter_dir = args.output_dir / input_path.stem / "adapter"
     progress = ProgressReporter(interval_seconds=args.progress_interval, enabled=not args.no_progress)
@@ -2927,6 +2919,7 @@ def main() -> None:
         fitments_fact_output_path=adapter_dir / "fitments_adapter_fact.tsv" if args.with_adapter else None,
         encoding=args.encoding,
         progress=progress,
+        field_profile=field_profile,
     )
     output_paths = write_outputs(
         non_pickup_lossless_df,

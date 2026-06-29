@@ -164,6 +164,7 @@ python .\process_tsv.py <输入TSV> [参数]
 ```text
 -o, --output-dir      输出根目录，默认 data/output
 --encoding            输入 TSV 编码，默认 utf-8-sig
+--field-profile       字段映射 YAML，用于把输入 TSV 的自定义列名映射成脚本标准字段
 --with-adapter        同时生成适配器、适配器日志和适配器事实表
 --sub-model           子车系事实源，默认 database/submodels.tsv
 --fitments            全量 fitments 事实源，默认 database/4Afitment_base.tsv
@@ -185,6 +186,7 @@ python .\build_adapter.py <输入TSV> [参数]
 --sub-model-fact-output       指定子车系事实表输出文件
 --fitments-fact-output        指定 fitments 事实表输出文件
 --encoding                    输入 TSV 编码，默认 utf-8-sig
+--field-profile               字段映射 YAML，用于兼容自定义输入列名
 ```
 
 ### check_atom.py
@@ -248,6 +250,61 @@ python .\check_atom.py --atom <原子事实表> --compress <压缩表> [参数]
 开始年 可为空；为空时从 年份区间 左端解析
 年份区间 不能为空；为空会直接报错
 ```
+
+### 使用字段 profile 兼容自定义列名
+
+可以用 YAML 配置输入 TSV 的列名。脚本内部仍然使用标准字段名，profile 只负责把你的输入列复制/映射到标准字段。
+
+示例命令：
+
+```powershell
+python .\process_tsv.py .\data\input\full0628.tsv --field-profile .\field_profile.default.yaml --with-adapter
+```
+
+单独跑适配器也支持同一个参数：
+
+```powershell
+python .\build_adapter.py .\data\input\full0628.tsv --field-profile .\field_profile.default.yaml
+```
+
+profile 示例：
+
+```yaml
+columns:
+  品牌:
+    - Make
+    - 品牌
+  前台车型:
+    - DisplayModel
+    - 前台车型
+    - 车型名
+  年份区间:
+    - YearRange
+    - 年份区间
+  最终尺码:
+    - Size
+    - 最终尺码
+    - 对应尺码
+  子车系:
+    - SubModel
+  驾驶室类型:
+    - Cab
+  货斗长度_ft:
+    - BedFt
+
+derived:
+  主车型:
+    join:
+      - 品牌
+      - 前台车型
+    sep: " "
+
+defaults:
+  # 分类为空时，脚本会退回用 驾驶室类型 / 货斗长度_ft 判断是否皮卡。
+  分类: ""
+```
+
+左边必须是脚本标准字段名，右边可以写你的 TSV 实际列名。某个标准字段已经存在时会直接使用它；不存在时才会按候选列名从上到下查找。`主车型` 可以通过 `derived` 自动由 `品牌 + 前台车型` 生成。
 
 ## 输出结果怎么看
 
