@@ -124,11 +124,15 @@ def apply_field_profile(df: pd.DataFrame, profile: dict[str, object] | None = No
     profile = profile or {}
 
     for canonical, aliases in _profile_column_aliases(profile).items():
-        if canonical in work.columns:
-            continue
         for alias in aliases:
-            if alias in work.columns:
+            if alias not in work.columns:
+                continue
+            if canonical not in work.columns:
                 work[canonical] = work[alias]
+                break
+            canonical_empty = work[canonical].map(normalize_text) == ""
+            if canonical_empty.any():
+                work.loc[canonical_empty, canonical] = work.loc[canonical_empty, alias]
                 break
 
     for column, rule in _profile_derived_columns(profile).items():
