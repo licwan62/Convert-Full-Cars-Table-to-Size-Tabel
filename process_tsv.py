@@ -8,16 +8,6 @@ import unicodedata
 
 import pandas as pd
 
-from build_adapter import (
-    DEFAULT_FITMENTS_FACT_OUTPUT_PATH,
-    DEFAULT_FITMENTS_PATH,
-    DEFAULT_SUB_MODEL_FACT_OUTPUT_PATH,
-    DEFAULT_SUB_MODEL_PATH,
-    build_adapter_outputs,
-    empty_adapter,
-    empty_adapter_fact,
-    empty_adapter_log,
-)
 from check_atom import build_atom_check
 from field_profile import apply_field_profile, load_field_profile
 from non_pickup_validation import (
@@ -47,13 +37,6 @@ PICKUP_REQUIRED_COLUMNS = [
     BACKSIZE_SOURCE_COLUMN,
     "驾驶室类型",
     "货斗长度_ft",
-]
-ADAPTER_REQUIRED_COLUMNS = [
-    "品牌",
-    "前台车型",
-    "子车系",
-    "年份区间",
-    BACKSIZE_SOURCE_COLUMN,
 ]
 NON_PICKUP_FINAL_COLUMNS = [
     "主车型",
@@ -92,12 +75,6 @@ PICKUP_EXPORT_COLUMNS = [
     "CAB",
     "BED",
     "BACKSIZE",
-]
-ADAPTER_FINAL_COLUMNS = [
-    "YEAR",
-    "MAKE",
-    "MODEL",
-    "SIZE",
 ]
 ATOM_FINAL_COLUMNS = [
     "压缩类型",
@@ -2546,20 +2523,10 @@ def build_compression_log(non_pickup_higher: pd.DataFrame, pickup_specificity: p
 
 def transform_all_outputs(
     df: pd.DataFrame,
-    with_adapter: bool = False,
     remove_null_size: bool = False,
-    sub_model_path: Path = DEFAULT_SUB_MODEL_PATH,
-    fitments_path: Path = DEFAULT_FITMENTS_PATH,
-    sub_model_fact_output_path: Path | None = DEFAULT_SUB_MODEL_FACT_OUTPUT_PATH,
-    fitments_fact_output_path: Path | None = DEFAULT_FITMENTS_FACT_OUTPUT_PATH,
-    encoding: str = "utf-8-sig",
     progress: ProgressReporter | None = None,
     field_profile: dict[str, object] | None = None,
 ) -> tuple[
-    pd.DataFrame,
-    pd.DataFrame,
-    pd.DataFrame,
-    pd.DataFrame,
     pd.DataFrame,
     pd.DataFrame,
     pd.DataFrame,
@@ -2574,22 +2541,6 @@ def transform_all_outputs(
         remove_null_size=remove_null_size,
         field_profile=field_profile,
     )
-    if with_adapter:
-        adapter_df, adapter_log_df, sub_model_fact_df, fitments_fact_df = build_adapter_outputs(
-            df,
-            sub_model_path=sub_model_path,
-            fitments_path=fitments_path,
-            sub_model_fact_output_path=sub_model_fact_output_path,
-            fitments_fact_output_path=fitments_fact_output_path,
-            encoding=encoding,
-            remove_null_size=remove_null_size,
-            field_profile=field_profile,
-        )
-    else:
-        adapter_df = empty_adapter()
-        adapter_log_df = empty_adapter_log()
-        sub_model_fact_df = empty_adapter_fact()
-        fitments_fact_df = empty_adapter_fact()
     log_df = build_compression_log(non_pickup_higher, pickup_specificity)
     atom_df = build_atom_table(non_pickup_lossless, pickup_lossless)
     return (
@@ -2598,10 +2549,6 @@ def transform_all_outputs(
         non_pickup_higher,
         pickup_lossless,
         pickup_specificity,
-        adapter_df,
-        adapter_log_df,
-        sub_model_fact_df,
-        fitments_fact_df,
         log_df,
         atom_df,
     )
@@ -2614,10 +2561,6 @@ def build_summary_markdown(
     non_pickup_higher_df: pd.DataFrame,
     pickup_lossless_df: pd.DataFrame,
     pickup_specificity_df: pd.DataFrame,
-    adapter_df: pd.DataFrame,
-    adapter_log_df: pd.DataFrame,
-    sub_model_fact_df: pd.DataFrame,
-    fitments_fact_df: pd.DataFrame,
     log_df: pd.DataFrame,
     atom_df: pd.DataFrame,
 ) -> str:
@@ -2631,10 +2574,6 @@ def build_summary_markdown(
         f"- 非皮卡高度压缩行数: {len(non_pickup_higher_df)}",
         f"- 皮卡无损压缩行数: {len(pickup_lossless_df)}",
         f"- 皮卡特定性压缩行数: {len(pickup_specificity_df)}",
-        f"- 适配器行数: {len(adapter_df)}",
-        f"- 子车系事实表行数: {len(sub_model_fact_df)}",
-        f"- 适配器全量事实表行数: {len(fitments_fact_df)}",
-        f"- 适配器事实表过滤行数: {len(adapter_log_df)}",
         f"- 压缩log行数: {len(log_df)}",
         f"- 原子事实表行数: {len(atom_df)}",
         "",
@@ -2661,8 +2600,6 @@ def build_summary_markdown(
         "",
         "- 压缩表不输出桥接状态和原始年份列表。",
         "- 中间压缩表不再生成。",
-        "- 适配器直接从全量表展开子车系、年份区间、最终尺码生成；旧表只有对应尺码时会兼容映射。",
-        f"- 适配器会先用子车系事实表过滤，再用适配器全量事实表过滤；事实表会输出到 {DEFAULT_SUB_MODEL_FACT_OUTPUT_PATH.relative_to(PROJECT_ROOT).as_posix()} 和 {DEFAULT_FITMENTS_FACT_OUTPUT_PATH.relative_to(PROJECT_ROOT).as_posix()}。",
         "- 特殊版本结合进基础记录时使用 Incl: 前缀。",
         "- 特殊版本未匹配基础记录而单独输出时不加 Incl: 前缀。",
         "- 非皮卡原子事实会按 MODEL 中的 | 拆成多条记录。",
@@ -2698,13 +2635,10 @@ def write_outputs(
     non_pickup_higher_df: pd.DataFrame,
     pickup_lossless_df: pd.DataFrame,
     pickup_specificity_df: pd.DataFrame,
-    adapter_df: pd.DataFrame,
-    adapter_log_df: pd.DataFrame,
     log_df: pd.DataFrame,
     atom_df: pd.DataFrame,
     input_path: Path,
     output_dir: Path,
-    with_adapter: bool = False,
     check_atom: bool = False,
     progress: ProgressReporter | None = None,
 ) -> dict[str, Path]:
@@ -2712,28 +2646,19 @@ def write_outputs(
     project_output_dir = output_dir / stem
     project_output_dir.mkdir(parents=True, exist_ok=True)
     compress_dir = project_output_dir / "compress"
-    adapter_dir = project_output_dir / "adapter"
     check_dir = project_output_dir / "check"
     compress_dir.mkdir(parents=True, exist_ok=True)
-    if with_adapter:
-        adapter_dir.mkdir(parents=True, exist_ok=True)
     if check_atom:
         check_dir.mkdir(parents=True, exist_ok=True)
 
     for stale_path in [*compress_dir.glob(f"{stem}_*"), *check_dir.glob(f"{stem}_*"), *project_output_dir.glob(f"{stem}_*.xlsx")]:
         if stale_path.is_file():
             stale_path.unlink()
-    if with_adapter:
-        for stale_path in adapter_dir.glob(f"{stem}_*"):
-            if stale_path.is_file():
-                stale_path.unlink()
 
     non_pickup_lossless_tsv_path = compress_dir / f"{stem}_非皮卡无损压缩表.tsv"
     non_pickup_higher_tsv_path = compress_dir / f"{stem}_非皮卡高度压缩表.tsv"
     pickup_lossless_tsv_path = compress_dir / f"{stem}_皮卡无损压缩.tsv"
     pickup_specificity_tsv_path = compress_dir / f"{stem}_皮卡高度压缩表.tsv"
-    adapter_tsv_path = adapter_dir / f"{stem}_适配器.tsv"
-    adapter_log_tsv_path = adapter_dir / f"{stem}_适配器log.tsv"
     log_tsv_path = compress_dir / f"{stem}_压缩log.tsv"
     atom_tsv_path = compress_dir / f"{stem}_原子事实表.tsv"
     non_pickup_check_tsv_path = check_dir / f"{stem}_非皮卡原子检查.tsv"
@@ -2752,9 +2677,6 @@ def write_outputs(
         export_pickup_table(pickup_specificity_df).to_csv(
             pickup_specificity_tsv_path, sep="\t", index=False, encoding="utf-8-sig"
         )
-    if with_adapter:
-        adapter_df.to_csv(adapter_tsv_path, sep="\t", index=False, encoding="utf-8-sig")
-        adapter_log_df.to_csv(adapter_log_tsv_path, sep="\t", index=False, encoding="utf-8-sig")
     export_table(log_df).to_csv(log_tsv_path, sep="\t", index=False, encoding="utf-8-sig")
     export_table(atom_df).to_csv(atom_tsv_path, sep="\t", index=False, encoding="utf-8-sig")
     non_pickup_check_df = pd.DataFrame()
@@ -2787,9 +2709,6 @@ def write_outputs(
         if not pickup_lossless_df.empty:
             export_pickup_table(pickup_lossless_df).to_excel(writer, sheet_name="皮卡无损", index=False)
             export_pickup_table(pickup_specificity_df).to_excel(writer, sheet_name="皮卡高度", index=False)
-        if with_adapter:
-            adapter_df.to_excel(writer, sheet_name="适配器", index=False)
-            adapter_log_df.to_excel(writer, sheet_name="适配器log", index=False)
         export_table(log_df).to_excel(writer, sheet_name="压缩log", index=False)
         export_table(atom_df).to_excel(writer, sheet_name="原子事实表", index=False)
         if check_atom and not non_pickup_check_df.empty:
@@ -2810,10 +2729,6 @@ def write_outputs(
             paths["non_pickup_check_tsv"] = non_pickup_check_tsv_path
         if not pickup_check_df.empty:
             paths["pickup_check_tsv"] = pickup_check_tsv_path
-    if with_adapter:
-        paths["adapter_dir"] = adapter_dir
-        paths["adapter_tsv"] = adapter_tsv_path
-        paths["adapter_log_tsv"] = adapter_log_tsv_path
     if not non_pickup_lossless_df.empty:
         paths["non_pickup_lossless_tsv"] = non_pickup_lossless_tsv_path
         paths["non_pickup_higher_tsv"] = non_pickup_higher_tsv_path
@@ -2845,27 +2760,9 @@ def parse_args() -> argparse.Namespace:
         help="YAML file that maps input column names to the script's standard fields.",
     )
     parser.add_argument(
-        "--with-adapter",
-        action="store_true",
-        help="Also generate adapter TSV with sub_model and fitments fact checks.",
-    )
-    parser.add_argument(
         "--remove-null-size",
         action="store_true",
         help="Filter out rows whose size is 无可用尺码. By default these rows are kept.",
-    )
-    parser.add_argument(
-        "--sub-model",
-        dest="sub_model",
-        type=Path,
-        default=DEFAULT_SUB_MODEL_PATH,
-        help="Sub-model source TSV for adapter generation. Defaults to database/submodels.tsv.",
-    )
-    parser.add_argument(
-        "--fitments",
-        type=Path,
-        default=DEFAULT_FITMENTS_PATH,
-        help="Full fitments fact TSV for adapter generation. Defaults to database/4Afitment_base.tsv.",
     )
     parser.add_argument(
         "--check-atom",
@@ -2895,7 +2792,6 @@ def main() -> None:
 
     field_profile = load_field_profile(args.field_profile.resolve() if args.field_profile else None)
     df = read_tsv(input_path, encoding=args.encoding)
-    adapter_dir = args.output_dir / input_path.stem / "adapter"
     progress = ProgressReporter(interval_seconds=args.progress_interval, enabled=not args.no_progress)
     (
         non_pickup_lossless_df,
@@ -2903,21 +2799,11 @@ def main() -> None:
         non_pickup_higher_df,
         pickup_lossless_df,
         pickup_specificity_df,
-        adapter_df,
-        adapter_log_df,
-        sub_model_fact_df,
-        fitments_fact_df,
         log_df,
         atom_df,
     ) = transform_all_outputs(
         df,
-        with_adapter=args.with_adapter,
         remove_null_size=args.remove_null_size,
-        sub_model_path=args.sub_model.resolve(),
-        fitments_path=args.fitments.resolve(),
-        sub_model_fact_output_path=adapter_dir / "submodels_adapter_fact.tsv" if args.with_adapter else None,
-        fitments_fact_output_path=adapter_dir / "fitments_adapter_fact.tsv" if args.with_adapter else None,
-        encoding=args.encoding,
         progress=progress,
         field_profile=field_profile,
     )
@@ -2927,13 +2813,10 @@ def main() -> None:
         non_pickup_higher_df,
         pickup_lossless_df,
         pickup_specificity_df,
-        adapter_df,
-        adapter_log_df,
         log_df,
         atom_df,
         input_path,
         args.output_dir,
-        with_adapter=args.with_adapter,
         check_atom=args.check_atom,
         progress=progress,
     )
@@ -2946,11 +2829,6 @@ def main() -> None:
     if "pickup_lossless_tsv" in output_paths:
         print(f"Pickup lossless TSV: {output_paths['pickup_lossless_tsv']}")
         print(f"Pickup high TSV: {output_paths['pickup_higher_tsv']}")
-    if args.with_adapter:
-        print(f"Adapter TSV: {output_paths['adapter_tsv']}")
-        print(f"Adapter log TSV: {output_paths['adapter_log_tsv']}")
-        print(f"Sub-model fact TSV: {adapter_dir / 'submodels_adapter_fact.tsv'}")
-        print(f"Fitments fact TSV: {adapter_dir / 'fitments_adapter_fact.tsv'}")
     print(f"Log TSV: {output_paths['log_tsv']}")
     print(f"Atom TSV: {output_paths['atom_tsv']}")
     if args.check_atom:
